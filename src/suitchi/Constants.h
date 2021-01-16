@@ -10,8 +10,8 @@
 
 #define homeKitPin "1CB8"
 #define homeKitPassword "111-11-111"
-#define bridgeName "Smart Switch 1CB8" 
-#define otaName "kitchen_switch"
+#define bridgeName "Suitchi 1CB8" 
+#define otaName "suitchi_1CB8"
 #define serialNumber "123457"
 
 #endif /* CONSTANTS_H_ */
