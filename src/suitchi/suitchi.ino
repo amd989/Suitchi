@@ -34,6 +34,11 @@
 #include <ArduinoOTA.h>
 #include <SimpleTimer.h>
 
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+
 #define LOG_D(fmt, ...)   printf_P(PSTR(fmt "\n") , ##__VA_ARGS__);
 
 
@@ -51,12 +56,13 @@ SSD1306Brzo display(0x3c, SDA, SCL, GEOMETRY_64_48 );  // ADDRESS, SDA, SCL
 //OLEDDisplayUi ui     ( &display );
 DHT dht(DHTPIN, DHTTYPE);
 
+// Listen for HTTP requests on standard port 80
+ESP8266WebServer server(80);
+
 //Sensor variables
 float humidity, temperature, hindex;                         // Raw float values from the sensor
 char str_humidity[10], str_temperature[10], str_hindex[10];  // Rounded sensor values as strings
 bool pushButton, ocuppancy, motion = false;
-
-SimpleTimer occupancyTimer;                                  //this timer is used to shut off the fan after a certain ammount of time
 
 // Generally, you should use "unsigned long" for variables that hold time
 unsigned long previousMillis = 0;            // When the sensor was last read
@@ -64,66 +70,39 @@ const long interval = 2000;                  // Wait this long until reading aga
 
 // countdown variables and timer
 const int CountdownTime = 60;                // Time to wait until occupancy is turned off.
-int CountdownRemain;
 int CountdownTimer;
+SimpleTimer occupancyTimer;                  // this timer is used to shut off the occupancy after a certain ammount of time
 
-void read_sensor() {
-
-  motion = digitalRead(OCCUPANCYPIN) == 1;
-  if (motion) {
-    CountdownRemain = CountdownTime;
-    occupancyTimer.disable(CountdownTimer);
-    occupancyTimer.enable(CountdownTimer);
-  }
-
-  // Wait at least 2 seconds seconds between measurements.
-  // If the difference between the current time and last time you read
-  // the sensor is bigger than the interval you set, read the sensor.
-  // Works better than delay for things happening elsewhere also.
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - previousMillis >= interval) {
-    // Save the last time you read the sensor
-    previousMillis = currentMillis;
-
-    // Reading temperature and humidity takes about 250 milliseconds!
-    // Sensor readings may also be up to 2 seconds 'old' (it's a very slow sensor)
-    humidity = dht.readHumidity();        // Read humidity as a percent
-    temperature = dht.readTemperature();  // Read temperature as Celsius
-
-    // Check if any reads failed and exit early (to try again).
-    if (isnan(humidity) || isnan(temperature)) {
-      Serial.println("Failed to read from DHT sensor!");
-      return;
-    }
-
-    hindex = dht.computeHeatIndex(temperature, humidity, false);  // Read temperature as Celsius
-
-    // Convert the floats to strings and round to 2 decimal places
-    dtostrf(hindex, 1, 2, str_hindex);
-    dtostrf(humidity, 1, 2, str_humidity);
-    dtostrf(temperature, 1, 2, str_temperature);
-  }
+//Sets up the initial page
+void handle_root() {
+  server.send(200, "text/plain", "Welcome to Suitchi Web Server.");
+  delay(100);
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200);  
+  Serial.println("Starting...");
+
+  Serial.println("Setup DHT...");
   dht.begin();
 
+  Serial.println("Setup UI...");
   // Initialising the UI will init the display too.
   display.init();
   display.flipScreenVertically();
   display.setContrast(255);
   display.setFont(ArialMT_Plain_10);
-
   drawFrame0(&display, 0, 0);
 
+  Serial.println("Setup WiFi...");
   wifi_connect(); // in wifi_info.h
 
+  Serial.println("Setup Timers...");
   // Setup occupancy timer
-  CountdownTimer = occupancyTimer.setInterval(1000L, CountdownTimerFunction);
+  CountdownTimer = occupancyTimer.setInterval(CountdownTime * 1000L, CountdownTimerFunction);
   occupancyTimer.disable(CountdownTimer);
 
+  Serial.println("Setup OTA...");
   // For OTA - Use your own device identifying name (in Constants.h)
   ArduinoOTA.setHostname(otaName); 
   ArduinoOTA.onStart([]() {
@@ -160,8 +139,26 @@ void setup() {
     display.display();
   });
 
-  //homekit_storage_reset(); // to remove the previous HomeKit pairing storage when you first run this new HomeKit example
+  Serial.println("Setup Web Server...");
+  // Handle http request display root
+  server.on("/", HTTP_GET, handle_root);
+
+  // Handle http requests display temp+hum value
+  server.on("/TH", []() {
+    read_sensor();
+    char response[50];
+    snprintf(response, 50, "{ \"Temperature\": %s, \"Humidity\" : %s }", str_temperature, str_humidity);
+    server.send(200, "application/json", response);
+  });
+  
+  // Start the web server
+  server.begin();
+
+  Serial.println("Setup Homekit...");
+  //homekit_storage_reset(); // to remove the previous HomeKit pairing storage when you first run this HomeKit sketch
   my_homekit_setup();
+  
+  Serial.println("Startup Complete.");
 }
 
 // This array keeps function pointers to all frames
@@ -214,6 +211,48 @@ void cha_switch_on_setter(const homekit_value_t value) {
   cha_switch_on.value.bool_value = on;  //sync the value
   LOG_D("Switch: %s", on ? "ON" : "OFF");
   digitalWrite(RELAYPIN, on ? HIGH : LOW);
+}
+
+void read_sensor() {
+
+  motion = digitalRead(OCCUPANCYPIN) == 1;
+  if (motion) {    
+    // Report Occupancy
+    ocuppancy = true;     
+    cha_occupancy.value.uint8_value = (uint8_t)ocuppancy;
+    homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);  
+    occupancyTimer.disable(CountdownTimer);
+    occupancyTimer.enable(CountdownTimer);
+  }
+
+  // Wait at least 2 seconds seconds between measurements.
+  // If the difference between the current time and last time you read
+  // the sensor is bigger than the interval you set, read the sensor.
+  // Works better than delay for things happening elsewhere also.
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    // Save the last time you read the sensor
+    previousMillis = currentMillis;
+
+    // Reading temperature and humidity takes about 250 milliseconds!
+    // Sensor readings may also be up to 2 seconds 'old' (it's a very slow sensor)
+    humidity = dht.readHumidity();        // Read humidity as a percent
+    temperature = dht.readTemperature();  // Read temperature as Celsius
+
+    // Check if any reads failed and exit early (to try again).
+    if (isnan(humidity) || isnan(temperature)) {
+      Serial.println("Failed to read from DHT sensor!");
+      return;
+    }
+
+    hindex = dht.computeHeatIndex(temperature, humidity, false);  // Read temperature as Celsius
+
+    // Convert the floats to strings and round to 2 decimal places
+    dtostrf(hindex, 1, 2, str_hindex);
+    dtostrf(humidity, 1, 2, str_humidity);
+    dtostrf(temperature, 1, 2, str_temperature);
+  }
 }
 
 void my_homekit_setup() {
@@ -306,16 +345,12 @@ void my_homekit_report() {
 
 void CountdownTimerFunction()
 {
-  //Serial.print("Countdown function called ");
-  CountdownRemain--; // remove 1 every second
-  //Serial.println(CountdownRemain);
-  if (!CountdownRemain) { // check if CountdownRemain == 0/FALSE/LOW
-    ocuppancy = false;
-    occupancyTimer.disable(CountdownTimer); // if 0 stop timer
-    CountdownRemain = CountdownTime;
-  } else {
-    ocuppancy = true;
-  }
+  //Serial.print("Countdown function called "); 
+  // Report Occupancy
+  ocuppancy = false;     
+  cha_occupancy.value.uint8_value = (uint8_t)ocuppancy;
+  homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);  
+  occupancyTimer.disable(CountdownTimer); // stop timer
 }
 
 void drawFrame0(SSD1306Brzo *display, int16_t x, int16_t y) {

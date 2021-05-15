@@ -6,7 +6,7 @@ DIY Smart Switch with HomeKit Support
 - Motion/Occupancy Sensor
 - Temperature & Humidity Sensor
 - NO/NC Relay Switch
-- OLED Screen
+- OLED Status Screen
 
 ## Acknowledgements
 This product was only possible with the help of the following OSS
