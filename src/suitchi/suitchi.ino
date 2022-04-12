@@ -1,8 +1,8 @@
 /*
- * suitchi.ino
- *
- *  Created on: 2020-12-01
- *      Author: amd989 (Alejandro Mora)
+   suitchi.ino
+
+    Created on: 2020-12-01
+        Author: amd989 (Alejandro Mora)
 
    This code represents a bridge (aka gateway) which contains multiple accessories.
 
@@ -32,7 +32,7 @@
 
 #include <DHT.h>
 #include <ArduinoOTA.h>
-#include <SimpleTimer.h>
+// #include <SimpleTimer.h>
 
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
@@ -46,7 +46,7 @@
 // Setting up the pin and DHT version
 #define DHTTYPE DHT11   // DHT Shield uses DHT 11
 
-#define RELAYPIN D8     // Relay Shield uses pin D0
+#define RELAYPIN D8     // Relay Shield uses pin D8
 #define OCCUPANCYPIN D3 // Occupancy uses pin D3
 #define DHTPIN D4       // DHT Shield uses pin D4
 #define SWITCHPIN D7    // Relay Shield uses pin D7
@@ -74,7 +74,7 @@ const long interval = 2000;                  // Wait this long until reading aga
 // countdown variables and timer
 const int CountdownTime = 60;                // Time to wait until occupancy is turned off.
 int CountdownTimer;
-SimpleTimer occupancyTimer;                  // this timer is used to shut off the occupancy after a certain ammount of time
+// SimpleTimer occupancyTimer;                  // this timer is used to shut off the occupancy after a certain ammount of time
 
 void(* resetFunc) (void) = 0;  // declare reset fuction at address 0
 
@@ -85,7 +85,7 @@ void handle_root() {
 }
 
 void setup() {
-  Serial.begin(115200);  
+  Serial.begin(115200);
   Serial.println("Starting...");
 
   Serial.println("Setup DHT...");
@@ -102,14 +102,9 @@ void setup() {
   Serial.println("Setup WiFi...");
   wifi_connect(); // in wifi_info.h
 
-  Serial.println("Setup Timers...");
-  // Setup occupancy timer
-  CountdownTimer = occupancyTimer.setInterval(CountdownTime * 1000L, CountdownTimerFunction);
-  occupancyTimer.disable(CountdownTimer);
-
   Serial.println("Setup OTA...");
   // For OTA - Use your own device identifying name (in Constants.h)
-  ArduinoOTA.setHostname(otaName); 
+  ArduinoOTA.setHostname(otaName);
   ArduinoOTA.onStart([]() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
@@ -157,26 +152,26 @@ void setup() {
   });
 
   // Handle http requests display temp+hum value
-  server.on("/motion", []() {    
+  server.on("/motion", []() {
     char response[55];
     snprintf(response, 55, "{ \"Motion\": %s, \"Occupancy\" : %s }", motion ? "1" : "0", occupancy ? "1" : "0");
     server.send(200, "application/json", response);
   });
 
-  // Handle http requests display temp+hum value
-  server.on("/status", []() {    
+  // Handle http requests display Heap+Clients
+  server.on("/status", []() {
     char response[55];
     snprintf(response, 55, "{ \"Heap\": %d, \"Clients\" : %d }", ESP.getFreeHeap(), arduino_homekit_connected_clients_count());
     server.send(200, "application/json", response);
   });
-  
+
   // Start the web server
   server.begin();
 
   Serial.println("Setup Homekit...");
   //homekit_storage_reset(); // to remove the previous HomeKit pairing storage when you first run this HomeKit sketch
   my_homekit_setup();
-  
+
   Serial.println("Startup Complete.");
 }
 
@@ -193,14 +188,14 @@ int overlaysCount = 0;
 
 void loop() {
   ArduinoOTA.handle();
-  occupancyTimer.run();
+  // occupancyTimer.run();
   server.handleClient();
   ESPButton.loop();
   read_sensor();
   delay(10);
   my_homekit_loop();
   delay(10);
-  drawFrame1(&display, 0, 0);  
+  drawFrame1(&display, 0, 0);
 }
 
 //==============================
@@ -235,30 +230,35 @@ void cha_switch_on_setter(const homekit_value_t value) {
 }
 
 void read_sensor() {
-    // read the occupancy input:
+  // read the occupancy input:
   motionState = digitalRead(OCCUPANCYPIN);
-  if (motionState != lastMotionState) {    
-    if (motionState == HIGH) {      
+  if (motionState != lastMotionState) {
+    if (motionState == HIGH) {
       // Report Occupancy
-      occupancy = true;     
+      occupancy = true;
       motion = true;
-      LOG_D("Motion: %s", motion ? "ON" : "OFF");
       cha_motion.value.bool_value = motion;
+      cha_occupancy.value.uint8_value = (uint8_t)occupancy;      
       homekit_characteristic_notify(&cha_motion, cha_motion.value);
-      cha_occupancy.value.uint8_value = (uint8_t)occupancy;
-      homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);        
-      occupancyTimer.disable(CountdownTimer);
-      occupancyTimer.enable(CountdownTimer);
-    } else {       
+      homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);      
+    } else {
       motion = false;
-      LOG_D("Motion: %s", motion ? "ON" : "OFF");
+      occupancy = false;      
+      cha_motion.value.bool_value = motion;
+      cha_occupancy.value.uint8_value = (uint8_t)occupancy;
+      homekit_characteristic_notify(&cha_motion, cha_motion.value);
+      homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);
     }
+   
+    LOG_D("Motion: %s", motion ? "ON" : "OFF");
+            
     // Delay a little bit to avoid bouncing
-    delay(50);
+    delay(50);        
   }
+
   // save the current state as the last state, for next time through the loop
   lastMotionState = motionState;
-    
+
   // Wait at least 2 seconds seconds between measurements.
   // If the difference between the current time and last time you read
   // the sensor is bigger than the interval you set, read the sensor.
@@ -279,7 +279,7 @@ void read_sensor() {
       Serial.println("Failed to read from DHT sensor!");
       return;
     }
-    
+
     hindex = dht.computeHeatIndex(temperature, humidity, false);  // Read temperature as Celsius
 
     // Convert the floats to strings and round to 2 decimal places
@@ -302,19 +302,19 @@ void my_homekit_setup() {
     LOG_D("Button Event: %s", ESPButton.getButtonEventDescription(event));
 
     if (event == ESPBUTTONEVENT_SINGLECLICK) {
-        bool switchValue = !cha_switch_on.value.bool_value;
-        cha_switch_on.value.bool_value = switchValue; // sync the value
-        digitalWrite(RELAYPIN, switchValue ? HIGH : LOW);
-        LOG_D("Switch: %s", switchValue ? "ON" : "OFF");
-        homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
-    } else if (event == ESPBUTTONEVENT_DOUBLECLICK) {            
+      bool switchValue = !cha_switch_on.value.bool_value;
+      cha_switch_on.value.bool_value = switchValue; // sync the value
+      digitalWrite(RELAYPIN, switchValue ? HIGH : LOW);
+      LOG_D("Switch: %s", switchValue ? "ON" : "OFF");
+      homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
+    } else if (event == ESPBUTTONEVENT_DOUBLECLICK) {
     } else if (event == ESPBUTTONEVENT_LONGCLICK) {
       drawFrame0(&display, 0, 0);
-      homekit_storage_reset(); // to remove the previous HomeKit pairing storage   
+      homekit_storage_reset(); // to remove the previous HomeKit pairing storage
       delay(1000);
       Serial.println("Restarting...");
       resetFunc(); //call reset
-    }   
+    }
   });
   ESPButton.begin();
 
@@ -326,13 +326,16 @@ void my_homekit_setup() {
   cha_switch_on.setter = cha_switch_on_setter;
   // cha_switch_on.getter = cha_switch_on_getter;
   arduino_homekit_setup(&config);
+
+  cha_motion.value.bool_value = false;
+  cha_occupancy.value.bool_value = false;  
 }
 
 static uint32_t next_heap_millis = 0;
 static uint32_t next_report_millis = 0;
 
 void my_homekit_loop() {
-  arduino_homekit_loop();    
+  arduino_homekit_loop();
   const uint32_t t = millis();
   if (t >= next_report_millis) {
     // report sensor values every 2 seconds
@@ -343,12 +346,12 @@ void my_homekit_loop() {
     // Show heap info every 5 seconds
     next_heap_millis = t + 5 * 1000;
     LOG_D("Free heap: %d, HomeKit clients: %d",
-          ESP.getFreeHeap(), arduino_homekit_connected_clients_count());  
+          ESP.getFreeHeap(), arduino_homekit_connected_clients_count());
   }
 }
 
 void my_homekit_report() {
-   
+
   // Report Motion
   cha_motion.value.bool_value = motion;
   homekit_characteristic_notify(&cha_motion, cha_motion.value);
@@ -375,19 +378,6 @@ void my_homekit_report() {
   }
 
   LOG_D("t %.1f, h %.1f, m %u, o %u", temperature, humidity, (uint8_t)motion, (uint8_t)occupancy);
-}
-
-void CountdownTimerFunction()
-{
-  //Serial.print("Countdown function called "); 
-  // Report Occupancy
-  occupancy = false;     
-  motion = false;
-  cha_motion.value.bool_value = motion;
-  homekit_characteristic_notify(&cha_motion, cha_motion.value);
-  cha_occupancy.value.uint8_value = (uint8_t)occupancy;
-  homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);  
-  occupancyTimer.disable(CountdownTimer); // stop timer
 }
 
 void drawFrame0(SSD1306Brzo *display, int16_t x, int16_t y) {
