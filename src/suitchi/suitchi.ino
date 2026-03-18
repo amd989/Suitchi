@@ -31,12 +31,38 @@
 #include <DHT.h>
 #include <ArduinoOTA.h>
 
+#include <EEPROM.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 
 #define LOG_D(fmt, ...)   printf_P(PSTR(fmt "\n") , ##__VA_ARGS__);
+
+//////////////////////////
+// EEPROM relay state persistence
+// Byte 0: magic marker (0xA5 = valid data written)
+// Byte 1: relay state (0 or 1)
+#define EEPROM_SIZE       4
+#define EEPROM_MAGIC_ADDR 0
+#define EEPROM_RELAY_ADDR 1
+#define EEPROM_MAGIC      0xA5
+
+// Heap threshold: if free heap drops below this, do a controlled restart
+#define LOW_HEAP_THRESHOLD 4096
+
+void save_relay_state(bool on) {
+  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+  EEPROM.write(EEPROM_RELAY_ADDR, on ? 1 : 0);
+  EEPROM.commit();
+}
+
+bool load_relay_state() {
+  if (EEPROM.read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC) {
+    return false; // no saved state, default to off
+  }
+  return EEPROM.read(EEPROM_RELAY_ADDR) == 1;
+}
 
 
 //////////////////////////
@@ -76,6 +102,9 @@ void handle_root() {
 void setup() {
   Serial.begin(115200);
   Serial.println("Starting...");
+  Serial.printf("Reset reason: %s\n", ESP.getResetReason().c_str());
+
+  EEPROM.begin(EEPROM_SIZE);
 
   Serial.println("Setup DHT...");
   dht.begin();
@@ -145,10 +174,15 @@ void setup() {
     server.send(200, "application/json", response);
   });
 
-  // Handle http requests display Heap+Clients
+  // Handle http requests display status info
   server.on("/status", []() {
-    char response[55];
-    snprintf(response, 55, "{ \"Heap\": %d, \"Clients\" : %d }", ESP.getFreeHeap(), arduino_homekit_connected_clients_count());
+    char response[256];
+    snprintf(response, sizeof(response),
+      "{ \"Heap\": %d, \"Clients\": %d, \"Uptime\": %lu, \"ResetReason\": \"%s\" }",
+      ESP.getFreeHeap(),
+      arduino_homekit_connected_clients_count(),
+      millis() / 1000,
+      ESP.getResetReason().c_str());
     server.send(200, "application/json", response);
   });
 
@@ -198,6 +232,7 @@ void cha_switch_on_setter(const homekit_value_t value) {
   cha_switch_on.value.bool_value = on;  //sync the value
   LOG_D("Switch: %s", on ? "ON" : "OFF");
   digitalWrite(RELAYPIN, on ? HIGH : LOW);
+  save_relay_state(on);
   displayDirty = true;
 }
 
@@ -255,7 +290,11 @@ void my_homekit_setup() {
   pinMode(OCCUPANCYPIN, INPUT); // Set the occupancy input up
   pinMode(SWITCHPIN, INPUT_PULLUP); // Set the switch input up
 
-  digitalWrite(RELAYPIN, LOW); // Turn Relay Off
+  // Restore relay state from EEPROM so restarts don't change the light
+  bool savedState = load_relay_state();
+  digitalWrite(RELAYPIN, savedState ? HIGH : LOW);
+  cha_switch_on.value.bool_value = savedState;
+  LOG_D("Restored relay state: %s", savedState ? "ON" : "OFF");
 
   ESPButton.add(0, SWITCHPIN, LOW, false, true);
   ESPButton.setCallback([&](uint8_t id, ESPButtonEvent event) {
@@ -268,6 +307,7 @@ void my_homekit_setup() {
       digitalWrite(RELAYPIN, switchValue ? HIGH : LOW);
       LOG_D("Switch: %s", switchValue ? "ON" : "OFF");
       homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
+      save_relay_state(switchValue);
       displayDirty = true;
     } else if (event == ESPBUTTONEVENT_LONGCLICK) {
       drawFrame0(&display, 0, 0);
@@ -305,8 +345,15 @@ void my_homekit_loop() {
   if (t - last_heap_millis >= 5000) {
     // Show heap info every 5 seconds
     last_heap_millis = t;
+    uint32_t freeHeap = ESP.getFreeHeap();
     LOG_D("Free heap: %d, HomeKit clients: %d",
-          ESP.getFreeHeap(), arduino_homekit_connected_clients_count());
+          freeHeap, arduino_homekit_connected_clients_count());
+
+    // If heap is critically low, do a controlled restart (relay state is already saved)
+    if (freeHeap < LOW_HEAP_THRESHOLD) {
+      LOG_D("Heap critically low (%d bytes), restarting...", freeHeap);
+      ESP.restart();
+    }
   }
 }
 
