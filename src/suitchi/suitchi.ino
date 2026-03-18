@@ -26,13 +26,10 @@
 #include "ESPButton.h"
 #include "Constants.h"
 
-// Include the UI lib
-#include "SSD1306Brzo.h"
-#include "OLEDDisplayUi.h"
+#include "SSD1306Wire.h"
 
 #include <DHT.h>
 #include <ArduinoOTA.h>
-// #include <SimpleTimer.h>
 
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
@@ -52,8 +49,7 @@
 #define SWITCHPIN D7    // Relay Shield uses pin D7
 
 // Initialize the OLED display using Arduino Wire:
-SSD1306Brzo display(0x3c, SDA, SCL, GEOMETRY_64_48 );  // ADDRESS, SDA, SCL
-//OLEDDisplayUi ui     ( &display );
+SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_64_48 );  // ADDRESS, SDA, SCL
 DHT dht(DHTPIN, DHTTYPE);
 
 // Listen for HTTP requests on standard port 80
@@ -63,25 +59,18 @@ ESP8266WebServer server(80);
 float humidity, temperature, hindex;                         // Raw float values from the sensor
 char str_humidity[10], str_temperature[10], str_hindex[10];  // Rounded sensor values as strings
 
-bool occupancy, motion = false;
+bool occupancy = false, motion = false;
 int motionState = 0;         // current state of the motion sensor
 int lastMotionState = 0;     // previous state of the motion sensor
+bool displayDirty = true;    // flag to redraw OLED only when state changes
 
 // Generally, you should use "unsigned long" for variables that hold time
 unsigned long previousMillis = 0;            // When the sensor was last read
 const long interval = 2000;                  // Wait this long until reading again
 
-// countdown variables and timer
-const int CountdownTime = 60;                // Time to wait until occupancy is turned off.
-int CountdownTimer;
-// SimpleTimer occupancyTimer;                  // this timer is used to shut off the occupancy after a certain ammount of time
-
-void(* resetFunc) (void) = 0;  // declare reset fuction at address 0
-
 //Sets up the initial page
 void handle_root() {
   server.send(200, "text/plain", "Welcome to Suitchi Web Server.");
-  delay(100);
 }
 
 void setup() {
@@ -115,16 +104,14 @@ void setup() {
 
     // NOTE: if updating FS this would be the place to unmount FS using FS.end()
     Serial.println("Start updating " + type);
-  });
-
-  ArduinoOTA.begin();
-  ArduinoOTA.onStart([]() {
     display.clear();
     display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
     display.drawString(display.getWidth() / 2, display.getHeight() / 2 - 10, "OTA Update");
     display.display();
   });
+
+  ArduinoOTA.begin();
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     display.drawProgressBar(0, 32, 63, 8, progress / (total / 100) );
@@ -175,27 +162,17 @@ void setup() {
   Serial.println("Startup Complete.");
 }
 
-// This array keeps function pointers to all frames
-// frames are the single views that slide in
-// FrameCallback frames[] = { drawFrame1 };
-
-// how many frames are there?
-// int frameCount = 1;
-
-// Overlays are statically drawn on top of a frame eg. a clock
-OverlayCallback overlays[] = {  };
-int overlaysCount = 0;
-
 void loop() {
   ArduinoOTA.handle();
-  // occupancyTimer.run();
   server.handleClient();
   ESPButton.loop();
   read_sensor();
-  delay(10);
   my_homekit_loop();
-  delay(10);
-  drawFrame1(&display, 0, 0);
+  if (displayDirty) {
+    drawFrame1(&display, 0, 0);
+    displayDirty = false;
+  }
+  yield();
 }
 
 //==============================
@@ -215,45 +192,28 @@ extern "C" homekit_characteristic_t cha_occupancy;
 #define HOMEKIT_PROGRAMMABLE_SWITCH_EVENT_DOUBLE_PRESS   1
 #define HOMEKIT_PROGRAMMABLE_SWITCH_EVENT_LONG_PRESS     2
 
-// Called when the value is read by iOS Home APP
-homekit_value_t cha_switch_on_getter() {
-  // Should always return "null" for reading, see HAP section 9.75
-  return HOMEKIT_NULL_CPP();
-}
-
 //Called when the switch value is changed by iOS Home APP
 void cha_switch_on_setter(const homekit_value_t value) {
   bool on = value.bool_value;
   cha_switch_on.value.bool_value = on;  //sync the value
   LOG_D("Switch: %s", on ? "ON" : "OFF");
   digitalWrite(RELAYPIN, on ? HIGH : LOW);
+  displayDirty = true;
 }
 
 void read_sensor() {
   // read the occupancy input:
   motionState = digitalRead(OCCUPANCYPIN);
   if (motionState != lastMotionState) {
-    if (motionState == HIGH) {
-      // Report Occupancy
-      occupancy = true;
-      motion = true;
-      cha_motion.value.bool_value = motion;
-      cha_occupancy.value.uint8_value = (uint8_t)occupancy;      
-      homekit_characteristic_notify(&cha_motion, cha_motion.value);
-      homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);      
-    } else {
-      motion = false;
-      occupancy = false;      
-      cha_motion.value.bool_value = motion;
-      cha_occupancy.value.uint8_value = (uint8_t)occupancy;
-      homekit_characteristic_notify(&cha_motion, cha_motion.value);
-      homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);
-    }
-   
-    LOG_D("Motion: %s", motion ? "ON" : "OFF");
-            
-    // Delay a little bit to avoid bouncing
-    delay(50);        
+    motion = (motionState == HIGH);
+    occupancy = motion;
+    cha_motion.value.bool_value = motion;
+    cha_occupancy.value.uint8_value = (uint8_t)occupancy;
+    homekit_characteristic_notify(&cha_motion, cha_motion.value);
+    homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);
+    displayDirty = true;
+
+    LOG_D("Motion: %s", motion ? "ON" : "OFF");        
   }
 
   // save the current state as the last state, for next time through the loop
@@ -286,6 +246,7 @@ void read_sensor() {
     dtostrf(hindex, 1, 2, str_hindex);
     dtostrf(humidity, 1, 2, str_humidity);
     dtostrf(temperature, 1, 2, str_temperature);
+    displayDirty = true;
   }
 }
 
@@ -296,7 +257,7 @@ void my_homekit_setup() {
 
   digitalWrite(RELAYPIN, LOW); // Turn Relay Off
 
-  ESPButton.add(0, SWITCHPIN, LOW, true, true);
+  ESPButton.add(0, SWITCHPIN, LOW, false, true);
   ESPButton.setCallback([&](uint8_t id, ESPButtonEvent event) {
     // Only one button is added, no need to check the id.
     LOG_D("Button Event: %s", ESPButton.getButtonEventDescription(event));
@@ -307,13 +268,13 @@ void my_homekit_setup() {
       digitalWrite(RELAYPIN, switchValue ? HIGH : LOW);
       LOG_D("Switch: %s", switchValue ? "ON" : "OFF");
       homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
-    } else if (event == ESPBUTTONEVENT_DOUBLECLICK) {
+      displayDirty = true;
     } else if (event == ESPBUTTONEVENT_LONGCLICK) {
       drawFrame0(&display, 0, 0);
       homekit_storage_reset(); // to remove the previous HomeKit pairing storage
       delay(1000);
       Serial.println("Restarting...");
-      resetFunc(); //call reset
+      ESP.restart();
     }
   });
   ESPButton.begin();
@@ -324,70 +285,57 @@ void my_homekit_setup() {
   //Maybe this is a legacy design issue in the original esp-homekit library,
   //and I have no reason to modify this "feature".
   cha_switch_on.setter = cha_switch_on_setter;
-  // cha_switch_on.getter = cha_switch_on_getter;
   arduino_homekit_setup(&config);
 
   cha_motion.value.bool_value = false;
   cha_occupancy.value.bool_value = false;  
 }
 
-static uint32_t next_heap_millis = 0;
-static uint32_t next_report_millis = 0;
+static uint32_t last_report_millis = 0;
+static uint32_t last_heap_millis = 0;
 
 void my_homekit_loop() {
   arduino_homekit_loop();
   const uint32_t t = millis();
-  if (t >= next_report_millis) {
-    // report sensor values every 2 seconds
-    next_report_millis = t + 10 * 1000;
+  if (t - last_report_millis >= 10000) {
+    // report sensor values every 10 seconds
+    last_report_millis = t;
     my_homekit_report();
   }
-  if (t >= next_heap_millis) {
+  if (t - last_heap_millis >= 5000) {
     // Show heap info every 5 seconds
-    next_heap_millis = t + 5 * 1000;
+    last_heap_millis = t;
     LOG_D("Free heap: %d, HomeKit clients: %d",
           ESP.getFreeHeap(), arduino_homekit_connected_clients_count());
   }
 }
 
 void my_homekit_report() {
+  if (!(isnan(humidity) || isnan(temperature)) && (humidity < 100 || temperature < 50))
+  {
+    // Report Temperature
+    cha_temperature.value.float_value = temperature;
+    homekit_characteristic_notify(&cha_temperature, cha_temperature.value);
 
-  // Report Motion
-  cha_motion.value.bool_value = motion;
-  homekit_characteristic_notify(&cha_motion, cha_motion.value);
-
-  // Report Occupancy
-  cha_occupancy.value.uint8_value = (uint8_t)occupancy;
-  homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);
+    // Report Humidity
+    cha_humidity.value.float_value = humidity;
+    homekit_characteristic_notify(&cha_humidity, cha_humidity.value);
+  }
 
   // Report Switch
   homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
 
-  if (!(isnan(humidity) || isnan(temperature)) && (humidity < 100 || temperature < 50))
-  {
-    float t = temperature;
-    float h = humidity;
-
-    // Report Temperature
-    cha_temperature.value.float_value = t;
-    homekit_characteristic_notify(&cha_temperature, cha_temperature.value);
-
-    // Report Humidity
-    cha_humidity.value.float_value = h;
-    homekit_characteristic_notify(&cha_humidity, cha_humidity.value);
-  }
-
   LOG_D("t %.1f, h %.1f, m %u, o %u", temperature, humidity, (uint8_t)motion, (uint8_t)occupancy);
 }
 
-void drawFrame0(SSD1306Brzo *display, int16_t x, int16_t y) {
+void drawFrame0(SSD1306Wire *display, int16_t x, int16_t y) {
   display->clear();
   display->setFont(ArialMT_Plain_10);
   display->drawString(10 + x, 18 + y, "Starting...");
   display->display();
 }
 
-void drawFrame1(SSD1306Brzo *display, int16_t x, int16_t y) {
+void drawFrame1(SSD1306Wire *display, int16_t x, int16_t y) {
 
   // converts to int removing unnecessary decimal points
   int hAsInt = int(humidity);
@@ -409,12 +357,5 @@ void drawFrame1(SSD1306Brzo *display, int16_t x, int16_t y) {
   display->setFont(Icons_16);
   display->drawString(47 + x, 4  + y, String((uint8_t)occupancy));
   display->drawString(47 + x, 28 + y, cha_switch_on.value.bool_value ? "3" : "2");
-  display->display();
-}
-
-void drawFrame2(SSD1306Brzo *display, int16_t x, int16_t y) {
-  display->clear();
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(10 + x, 17 + y, "Resetting...");
   display->display();
 }

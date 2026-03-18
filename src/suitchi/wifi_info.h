@@ -11,8 +11,6 @@
 #if defined(ESP8266)
 #include <ESP8266WiFi.h>
 #endif
-#include "SSD1306Brzo.h"
-
 const char *ssid = "";
 const char *password = "";
 
@@ -22,7 +20,12 @@ void wifi_connect() {
 	WiFi.setAutoReconnect(true);
 	WiFi.begin(ssid, password);
 	Serial.println("WiFi connecting...");
+	unsigned long start = millis();
 	while (!WiFi.isConnected()) {
+		if (millis() - start > 30000) {
+			Serial.println("\nWiFi connection timeout, restarting...");
+			ESP.restart();
+		}
 		delay(100);
 		Serial.print(".");
 	}

@@ -91,7 +91,7 @@ homekit_accessory_t *accessories[] = {
     }),
 		NULL
 	}),
-	HOMEKIT_ACCESSORY(.id=6, .category=homekit_accessory_category_sensor, .services=(homekit_service_t*[]) {
+	HOMEKIT_ACCESSORY(.id=5, .category=homekit_accessory_category_sensor, .services=(homekit_service_t*[]) {
     	HOMEKIT_SERVICE(ACCESSORY_INFORMATION, .characteristics=(homekit_characteristic_t*[]) {
 			HOMEKIT_CHARACTERISTIC(NAME, "Motion Sensor"),
 			HOMEKIT_CHARACTERISTIC(IDENTIFY, my_accessory_identify),
@@ -104,7 +104,7 @@ homekit_accessory_t *accessories[] = {
 		}),
 		NULL
 	}),
-	HOMEKIT_ACCESSORY(.id=7, .category=homekit_accessory_category_sensor, .services=(homekit_service_t*[]) {
+	HOMEKIT_ACCESSORY(.id=6, .category=homekit_accessory_category_sensor, .services=(homekit_service_t*[]) {
     	HOMEKIT_SERVICE(ACCESSORY_INFORMATION, .characteristics=(homekit_characteristic_t*[]) {
 			HOMEKIT_CHARACTERISTIC(NAME, "Occupancy Sensor"),
 			HOMEKIT_CHARACTERISTIC(IDENTIFY, my_accessory_identify),
