@@ -46,7 +46,7 @@ homekit_accessory_t *accessories[] = {
             HOMEKIT_CHARACTERISTIC(MANUFACTURER, "Arduino HomeKit"),
             HOMEKIT_CHARACTERISTIC(SERIAL_NUMBER, serialNumber),
             HOMEKIT_CHARACTERISTIC(MODEL, "ESP8266/ESP32"),
-            HOMEKIT_CHARACTERISTIC(FIRMWARE_REVISION, "1.0"),
+            HOMEKIT_CHARACTERISTIC(FIRMWARE_REVISION, "2.0"),
             HOMEKIT_CHARACTERISTIC(IDENTIFY, my_accessory_identify),
             NULL
         }),
@@ -78,7 +78,7 @@ homekit_accessory_t *accessories[] = {
 		}),
 		NULL
 	}),
-	HOMEKIT_ACCESSORY(.id=4, .category=homekit_accessory_category_sensor, .services=(homekit_service_t*[]) {
+	HOMEKIT_ACCESSORY(.id=4, .category=homekit_accessory_category_switch, .services=(homekit_service_t*[]) {
     	HOMEKIT_SERVICE(ACCESSORY_INFORMATION, .characteristics=(homekit_characteristic_t*[]) {
 			HOMEKIT_CHARACTERISTIC(NAME, "Switch"),
 			HOMEKIT_CHARACTERISTIC(IDENTIFY, my_accessory_identify),

@@ -32,6 +32,9 @@
 #include <ArduinoOTA.h>
 
 #include <EEPROM.h>
+#ifdef MQTT_ENABLED
+#include <PubSubClient.h>
+#endif
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
@@ -80,6 +83,247 @@ DHT dht(DHTPIN, DHTTYPE);
 
 // Listen for HTTP requests on standard port 80
 ESP8266WebServer server(80);
+
+#ifdef MQTT_ENABLED
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient(mqttWifiClient);
+static uint32_t last_mqtt_millis = 0;
+static uint32_t last_mqtt_reconnect_millis = 0;
+// Forward declarations
+void mqtt_on_message(char* topic, uint8_t* payload, unsigned int length);
+void set_switch(bool on);
+
+// State topic helpers
+void mqtt_state_topic(char* buf, size_t len, const char* suffix) {
+  snprintf(buf, len, "%s/%s", MQTT_TOPIC_PREFIX, suffix);
+}
+
+void mqtt_publish(const char* subtopic, const char* payload, bool retained = false) {
+  if (!mqttClient.connected()) return;
+  char topic[80];
+  mqtt_state_topic(topic, sizeof(topic), subtopic);
+  mqttClient.publish(topic, payload, retained);
+}
+
+// Publish a single HA discovery config message.
+// Reuses a shared buffer to keep stack usage low.
+void mqtt_publish_discovery(const char* component, const char* object_id,
+                            const char* name, const char* state_suffix,
+                            const char* device_class, const char* unit,
+                            const char* extra_json) {
+  char disc_topic[128];
+  snprintf(disc_topic, sizeof(disc_topic),
+    "homeassistant/%s/%s/%s/config", component, MQTT_NODE_ID, object_id);
+
+  char state_topic[80];
+  mqtt_state_topic(state_topic, sizeof(state_topic), state_suffix);
+
+  char avail_topic[80];
+  mqtt_state_topic(avail_topic, sizeof(avail_topic), "status");
+
+  char payload[512];
+  int len = snprintf(payload, sizeof(payload),
+    "{"
+    "\"name\":\"%s\","
+    "\"unique_id\":\"%s_%s\","
+    "\"state_topic\":\"%s\","
+    "\"availability_topic\":\"%s\","
+    "\"payload_available\":\"online\","
+    "\"payload_not_available\":\"offline\","
+    "\"device\":{"
+      "\"identifiers\":[\"%s\"],"
+      "\"name\":\"%s\","
+      "\"manufacturer\":\"Suitchi\","
+      "\"model\":\"ESP8266\","
+      "\"sw_version\":\"2.0\""
+    "}",
+    name, MQTT_NODE_ID, object_id,
+    state_topic,
+    avail_topic,
+    MQTT_NODE_ID, bridgeName);
+
+  if (device_class && strlen(device_class) > 0) {
+    len += snprintf(payload + len, sizeof(payload) - len,
+      ",\"device_class\":\"%s\"", device_class);
+  }
+  if (unit && strlen(unit) > 0) {
+    len += snprintf(payload + len, sizeof(payload) - len,
+      ",\"unit_of_measurement\":\"%s\"", unit);
+  }
+  if (extra_json && strlen(extra_json) > 0) {
+    len += snprintf(payload + len, sizeof(payload) - len, ",%s", extra_json);
+  }
+  snprintf(payload + len, sizeof(payload) - len, "}");
+
+  mqttClient.publish(disc_topic, payload, true);
+  yield(); // let WiFi breathe between discovery messages
+}
+
+void mqtt_send_discovery() {
+  LOG_D("MQTT sending HA discovery configs...");
+
+  // Temperature sensor
+  mqtt_publish_discovery("sensor", "temperature",
+    "Temperature", "temperature",
+    "temperature", "\u00b0C", NULL);
+
+  // Humidity sensor
+  mqtt_publish_discovery("sensor", "humidity",
+    "Humidity", "humidity",
+    "humidity", "%", NULL);
+
+  // Heat index sensor
+  mqtt_publish_discovery("sensor", "heat_index",
+    "Heat Index", "heat_index",
+    "temperature", "\u00b0C", NULL);
+
+  // Motion binary sensor
+  mqtt_publish_discovery("binary_sensor", "motion",
+    "Motion", "motion",
+    "motion", NULL,
+    "\"payload_on\":\"ON\",\"payload_off\":\"OFF\"");
+
+  // Occupancy binary sensor
+  mqtt_publish_discovery("binary_sensor", "occupancy",
+    "Occupancy", "occupancy",
+    "occupancy", NULL,
+    "\"payload_on\":\"ON\",\"payload_off\":\"OFF\"");
+
+  // Switch with command topic for HA control
+  char cmd_topic[80];
+  mqtt_state_topic(cmd_topic, sizeof(cmd_topic), "switch/set");
+  char switch_extra[160];
+  snprintf(switch_extra, sizeof(switch_extra),
+    "\"command_topic\":\"%s\","
+    "\"payload_on\":\"ON\",\"payload_off\":\"OFF\","
+    "\"state_on\":\"ON\",\"state_off\":\"OFF\"",
+    cmd_topic);
+  mqtt_publish_discovery("switch", "relay",
+    "Switch", "switch",
+    "switch", NULL, switch_extra);
+
+  // Diagnostic sensors
+  mqtt_publish_discovery("sensor", "heap",
+    "Free Heap", "heap",
+    NULL, "B",
+    "\"entity_category\":\"diagnostic\",\"icon\":\"mdi:memory\"");
+
+  mqtt_publish_discovery("sensor", "uptime",
+    "Uptime", "uptime",
+    "duration", "s",
+    "\"entity_category\":\"diagnostic\"");
+
+  mqtt_publish_discovery("sensor", "reset_reason",
+    "Reset Reason", "reset_reason",
+    NULL, NULL,
+    "\"entity_category\":\"diagnostic\",\"icon\":\"mdi:restart-alert\"");
+
+  LOG_D("MQTT discovery configs sent");
+}
+
+void mqtt_reconnect() {
+  if (mqttClient.connected()) return;
+  const uint32_t t = millis();
+  if (t - last_mqtt_reconnect_millis < 5000) return;
+  last_mqtt_reconnect_millis = t;
+
+  LOG_D("MQTT connecting to %s:%d...", MQTT_SERVER, MQTT_PORT);
+
+  // LWT: broker publishes "offline" to status topic when we disconnect
+  char willTopic[80];
+  mqtt_state_topic(willTopic, sizeof(willTopic), "status");
+
+  bool connected;
+  if (strlen(MQTT_USER) > 0) {
+    connected = mqttClient.connect(otaName, MQTT_USER, MQTT_PASS, willTopic, 0, true, "offline");
+  } else {
+    connected = mqttClient.connect(otaName, willTopic, 0, true, "offline");
+  }
+
+  if (connected) {
+    LOG_D("MQTT connected");
+
+    // Subscribe to switch command topic
+    char cmd_topic[80];
+    mqtt_state_topic(cmd_topic, sizeof(cmd_topic), "switch/set");
+    mqttClient.subscribe(cmd_topic);
+
+    // Publish availability
+    mqtt_publish("status", "online", true);
+
+    // Send discovery configs (re-send on every reconnect to handle HA restarts)
+    mqtt_send_discovery();
+
+    // Publish reset reason
+    mqtt_publish("reset_reason", ESP.getResetReason().c_str(), true);
+  } else {
+    LOG_D("MQTT connection failed, state: %d", mqttClient.state());
+  }
+}
+
+void mqtt_on_message(char* topic, uint8_t* payload, unsigned int length) {
+  // Only one subscription: switch/set command
+  char cmd[8];
+  unsigned int copy_len = length < sizeof(cmd) - 1 ? length : sizeof(cmd) - 1;
+  memcpy(cmd, payload, copy_len);
+  cmd[copy_len] = '\0';
+
+  if (strcmp(cmd, "ON") == 0) {
+    set_switch(true);
+  } else if (strcmp(cmd, "OFF") == 0) {
+    set_switch(false);
+  }
+}
+
+void mqtt_setup() {
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient.setBufferSize(512); // discovery payloads are large
+  mqttClient.setCallback(mqtt_on_message);
+  mqtt_reconnect();
+}
+
+void mqtt_publish_state() {
+  char buf[16];
+
+  // Sensor values
+  if (!(isnan(temperature) || isnan(humidity))) {
+    dtostrf(temperature, 1, 1, buf);
+    mqtt_publish("temperature", buf, true);
+    dtostrf(humidity, 1, 1, buf);
+    mqtt_publish("humidity", buf, true);
+    dtostrf(hindex, 1, 1, buf);
+    mqtt_publish("heat_index", buf, true);
+  }
+
+  // Switch state
+  mqtt_publish("switch", cha_switch_on.value.bool_value ? "ON" : "OFF", true);
+
+  // Motion & occupancy
+  mqtt_publish("motion", motion ? "ON" : "OFF", true);
+  mqtt_publish("occupancy", occupancy ? "ON" : "OFF", true);
+
+  // Diagnostics
+  snprintf(buf, sizeof(buf), "%d", ESP.getFreeHeap());
+  mqtt_publish("heap", buf);
+
+  snprintf(buf, sizeof(buf), "%lu", millis() / 1000);
+  mqtt_publish("uptime", buf);
+}
+
+void mqtt_loop() {
+  mqtt_reconnect();
+  mqttClient.loop();
+  const uint32_t t = millis();
+  if (t - last_mqtt_millis >= MQTT_PUBLISH_INTERVAL) {
+    last_mqtt_millis = t;
+    mqtt_publish_state();
+  }
+}
+
+void mqtt_publish_event(const char* subtopic, const char* payload) {
+  mqtt_publish(subtopic, payload, true);
+}
+#endif
 
 //Sensor variables
 float humidity, temperature, hindex;                         // Raw float values from the sensor
@@ -193,6 +437,11 @@ void setup() {
   //homekit_storage_reset(); // to remove the previous HomeKit pairing storage when you first run this HomeKit sketch
   my_homekit_setup();
 
+#ifdef MQTT_ENABLED
+  Serial.println("Setup MQTT...");
+  mqtt_setup();
+#endif
+
   Serial.println("Startup Complete.");
 }
 
@@ -202,6 +451,9 @@ void loop() {
   ESPButton.loop();
   read_sensor();
   my_homekit_loop();
+#ifdef MQTT_ENABLED
+  mqtt_loop();
+#endif
   if (displayDirty) {
     drawFrame1(&display, 0, 0);
     displayDirty = false;
@@ -226,14 +478,22 @@ extern "C" homekit_characteristic_t cha_occupancy;
 #define HOMEKIT_PROGRAMMABLE_SWITCH_EVENT_DOUBLE_PRESS   1
 #define HOMEKIT_PROGRAMMABLE_SWITCH_EVENT_LONG_PRESS     2
 
-//Called when the switch value is changed by iOS Home APP
-void cha_switch_on_setter(const homekit_value_t value) {
-  bool on = value.bool_value;
-  cha_switch_on.value.bool_value = on;  //sync the value
-  LOG_D("Switch: %s", on ? "ON" : "OFF");
+// Unified switch control — called from HomeKit, physical button, and MQTT
+void set_switch(bool on) {
+  cha_switch_on.value.bool_value = on;
   digitalWrite(RELAYPIN, on ? HIGH : LOW);
   save_relay_state(on);
   displayDirty = true;
+  homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
+  LOG_D("Switch: %s", on ? "ON" : "OFF");
+#ifdef MQTT_ENABLED
+  mqtt_publish_event("switch", on ? "ON" : "OFF");
+#endif
+}
+
+//Called when the switch value is changed by iOS Home APP
+void cha_switch_on_setter(const homekit_value_t value) {
+  set_switch(value.bool_value);
 }
 
 void read_sensor() {
@@ -247,6 +507,10 @@ void read_sensor() {
     homekit_characteristic_notify(&cha_motion, cha_motion.value);
     homekit_characteristic_notify(&cha_occupancy, cha_occupancy.value);
     displayDirty = true;
+#ifdef MQTT_ENABLED
+    mqtt_publish_event("motion", motion ? "ON" : "OFF");
+    mqtt_publish_event("occupancy", occupancy ? "ON" : "OFF");
+#endif
 
     LOG_D("Motion: %s", motion ? "ON" : "OFF");        
   }
@@ -302,13 +566,7 @@ void my_homekit_setup() {
     LOG_D("Button Event: %s", ESPButton.getButtonEventDescription(event));
 
     if (event == ESPBUTTONEVENT_SINGLECLICK) {
-      bool switchValue = !cha_switch_on.value.bool_value;
-      cha_switch_on.value.bool_value = switchValue; // sync the value
-      digitalWrite(RELAYPIN, switchValue ? HIGH : LOW);
-      LOG_D("Switch: %s", switchValue ? "ON" : "OFF");
-      homekit_characteristic_notify(&cha_switch_on, cha_switch_on.value);
-      save_relay_state(switchValue);
-      displayDirty = true;
+      set_switch(!cha_switch_on.value.bool_value);
     } else if (event == ESPBUTTONEVENT_LONGCLICK) {
       drawFrame0(&display, 0, 0);
       homekit_storage_reset(); // to remove the previous HomeKit pairing storage
@@ -352,13 +610,18 @@ void my_homekit_loop() {
     // If heap is critically low, do a controlled restart (relay state is already saved)
     if (freeHeap < LOW_HEAP_THRESHOLD) {
       LOG_D("Heap critically low (%d bytes), restarting...", freeHeap);
+#ifdef MQTT_ENABLED
+      mqtt_publish("reset_reason", "low_heap", true);
+      mqtt_publish("status", "offline", true);
+      mqttClient.disconnect();
+#endif
       ESP.restart();
     }
   }
 }
 
 void my_homekit_report() {
-  if (!(isnan(humidity) || isnan(temperature)) && (humidity < 100 || temperature < 50))
+  if (!(isnan(humidity) || isnan(temperature)) && (humidity <= 100 && temperature <= 50))
   {
     // Report Temperature
     cha_temperature.value.float_value = temperature;
